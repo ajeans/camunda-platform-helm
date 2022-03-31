@@ -22,10 +22,13 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -219,6 +222,8 @@ func (s *integrationTest) loginToIdentity() (*bytes.Buffer, error) {
 
 	s.T().Logf("%s", token.AccessToken)
 
+	//client.GetClientSecret()
+
 
 	otherClients, err := client.GetClients(ctx, token.AccessToken, "camunda-platform", gocloak.GetClientsParams{})// client.GetClient(ctx, token.AccessToken, "camunda-platform", "camunda-identity")
 	if (err != nil) {
@@ -244,6 +249,61 @@ func (s *integrationTest) loginToIdentity() (*bytes.Buffer, error) {
 		}
 
 	}
+
+	identityServiceName := fmt.Sprintf("%s-identity", s.release)
+	endpoint, closeFn := s.createPortForwardedHttpClient(identityServiceName)
+	defer closeFn()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, err
+	}
+	httpClient := http.Client{
+		Jar:     jar,
+		Timeout: 30 * time.Second,
+	}
+
+	request, err := http.NewRequest("GET", "http://" + endpoint + "/auth/login", nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Close = true
+	response, err := httpClient.Do(request)
+	if err != nil {
+		return nil,err
+	}
+	defer response.Body.Close()
+	body := response.Body
+	b, err := io.ReadAll(body)
+
+	//  ... get body from /auth/login redirect
+	// <form id="kc-form-login" onsubmit="login.disabled = true; return true;"
+	//		action="http://localhost:18080/auth/realms/camunda-platform/login-actions/authenticate?session_code=B0BxW2ST2DH0NYE1J-THQncuCVc2yPck5JFmgEnLWbM&amp;execution=be1c2750-2b28-4044-8cf3-22b1331efeae&amp;client_id=camunda-identity&amp;tab_id=tp2zBJnsh6o"
+	//		method="post">
+
+	regexCompiled := regexp.MustCompile("(action=\")(.*)(\"[\\s\\w]+=\")")
+
+	submatch := regexCompiled.FindStringSubmatch(string(b))
+
+	//var res map[string]interface{}
+	sessionUrl := string(submatch[2])
+	sessionUrl = strings.Replace(sessionUrl, "&amp;", "&", -1)
+	values := url.Values{
+		"username":  {"demo"},
+		"password":  {"demo"},
+		"credentialId": {""},
+	}
+
+	resp, err := httpClient.PostForm(sessionUrl, values)
+	if err != nil {
+		return nil, err
+	}
+
+	b, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Println(string(b))
 
 	// curl -i -H "Content-Type: application/json" -XPOST "http://localhost:8080/v1/process-definitions/list" --cookie "ope-session" -d "{}"
 	return nil, nil
@@ -278,6 +338,8 @@ func (s *integrationTest) queryProcessDefinitionsFromOperate() (*bytes.Buffer, e
 	if err != nil {
 		return nil, err
 	}
+
+http://localhost:8081/api/clients
 
 	// curl -i -H "Content-Type: application/json" -XPOST "http://localhost:8080/v1/process-definitions/list" --cookie "ope-session" -d "{}"
 	return s.queryApi(httpClient, "http://"+endpoint+"/v1/process-definitions/list", bytes.NewBufferString("{}"))

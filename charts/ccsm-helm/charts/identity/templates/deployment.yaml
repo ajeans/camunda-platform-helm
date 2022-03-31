@@ -29,7 +29,7 @@ spec:
           - name: KEYCLOAK_USERS_0_PASSWORD
             value: "demo"
           - name: KEYCLOAK_USERS_0_ROLES_0
-            value: "Full Access"
+            value: "Identity"
           - name: KEYCLOAK_USERS_0_ROLES_1
             value: "Operate"
           - name: SERVER_PORT
