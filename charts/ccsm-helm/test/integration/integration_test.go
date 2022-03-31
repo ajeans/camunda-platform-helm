@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -310,8 +311,29 @@ func (s *integrationTest) loginToIdentity() (*bytes.Buffer, error) {
 
 	fmt.Println(string(b))
 
-	// curl -i -H "Content-Type: application/json" -XPOST "http://localhost:8080/v1/process-definitions/list" --cookie "ope-session" -d "{}"
+	jwtToken, err := s.extractJWTTokenFromCookieJar(jar)
+	s.Require().NoError(err)
+
+	getRequest, err := http.NewRequest("GET", "http://" + endpoint + "/api/clients", nil)
+	s.Require().NoError(err)
+	getRequest.Header.Set("Authentication", "Bearer " + jwtToken)
+
+	getResponse, err := httpClient.Do(getRequest)
+	s.Require().NoError(err)
+
+	s.Require().Equal(200, getResponse.StatusCode)
 	return nil, nil
+}
+
+func (s *integrationTest) extractJWTTokenFromCookieJar(jar *cookiejar.Jar) (string, error) {
+	cookies := jar.Cookies(&url.URL{Scheme: "http", Host: "localhost"})
+	identityJWT := "IDENTITY_JWT"
+	for _, cookie := range cookies {
+		if cookie.Name == identityJWT {
+			return cookie.Value, nil
+		}
+	}
+	return "", errors.New("no JWT token found in cookie jar")
 }
 
 func (s *integrationTest) printBody(err error, b []byte) (error) {
