@@ -19,7 +19,6 @@ package integration
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,7 +35,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Nerzal/gocloak/v11"
 	"github.com/camunda-cloud/zeebe/clients/go/pkg/pb"
 	"github.com/camunda-cloud/zeebe/clients/go/pkg/zbc"
 	"github.com/gruntwork-io/terratest/modules/k8s"
@@ -91,13 +89,10 @@ func (s *integrationTest) TestServicesEnd2End() {
 
 	// then
 	s.awaitCCSMPods()
-	_, err := s.loginToIdentity()
-	if err != nil {
-		s.T().Logf("Error on login %s", err)
-	}
 	//s.createProcessInstance()
-	//
+
 	//s.awaitElasticPods()
+	s.loginToIdentity()
 	//s.assertProcessDefinitionFromOperate()
 	//s.assertTasksFromTasklist()
 }
@@ -205,112 +200,74 @@ func (s *integrationTest) createProcessInstance() {
 	s.T().Logf(message)
 }
 
-func (s *integrationTest) loginToIdentity() (*bytes.Buffer, error) {
+func (s *integrationTest) loginToIdentity() {
 
-	secret := k8s.GetSecret(s.T(), s.kubeOptions, "ccsm-helm-test-keycloak")
-	password := secret.Data["admin-password"]
+	// in order to login to identity we need to port-forward to identity AND keycloak
+	// identity needs to redirect (forward) requests to keycloak to enable the login
 
+	// create keycloak port-forward
 	keycloakServiceName := fmt.Sprintf("%s-keycl", s.release)
-	_, closePortForward := s.createPortForwardedHttpClientWithPort(keycloakServiceName, 18080)
-	defer closePortForward()
+	_, closeKeycloakPortForward := s.createPortForwardedHttpClientWithPort(keycloakServiceName, 18080)
+	defer closeKeycloakPortForward()
 
-	client := gocloak.NewClient("http://localhost:18080")
-	restyClient := client.RestyClient()
-	restyClient.SetDebug(true)
-	restyClient.SetTLSClientConfig(&tls.Config{ InsecureSkipVerify: true })
-	ctx := context.Background()
-	// client.Login(ctx, "camunda-identity", "", "camunda-platform", "demo", "demo")
-	token, err :=  client.LoginAdmin(ctx, "admin", string(password), "master")
-	if err != nil {
-		return nil, err
-	}
-
-	s.T().Logf("%s", token.AccessToken)
-
-	//client.GetClientSecret()
-
-
-	otherClients, err := client.GetClients(ctx, token.AccessToken, "camunda-platform", gocloak.GetClientsParams{})// client.GetClient(ctx, token.AccessToken, "camunda-platform", "camunda-identity")
-	if (err != nil) {
-		return nil, err
-	}
-
-	for _, returnedClient := range otherClients {
-		if (returnedClient != nil) {
-			if (*returnedClient.ClientID == "camunda-identity") || strings.Contains(*returnedClient.ClientID, "operate") {
-				id := *returnedClient.ID
-
-				getClient, err := client.GetClient(ctx, token.AccessToken, "camunda-platform", id)
-				if (err != nil) {
-					return nil, err
-				}
-				if (getClient.Secret != nil)				{
-					s.T().Logf("%s", *getClient.Secret)
-				}
-
-
-				s.T().Logf("%v", getClient)
-			}
-		}
-
-	}
-
+	// create identity port-forward
 	identityServiceName := fmt.Sprintf("%s-identity", s.release)
-	endpoint, closeFn := s.createPortForwardedHttpClientWithPort(identityServiceName, 8080)
-	defer closeFn()
+	endpoint, closeIdentityPortForward := s.createPortForwardedHttpClientWithPort(identityServiceName, 8080)
+	defer closeIdentityPortForward()
+
+
+	// setup http client with cookie jar - necessary to store tokens
 	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, err
-	}
+	s.Require().NoError(err)
 	httpClient := http.Client{
 		Jar:     jar,
 		Timeout: 30 * time.Second,
 	}
 
+	// request /auth/login - and follow redirect to retrieve login page
 	request, err := http.NewRequest("GET", "http://" + endpoint + "/auth/login", nil)
-	if err != nil {
-		return nil, err
-	}
-	request.Close = true
+	s.Require().NoError(err)
 	response, err := httpClient.Do(request)
-	if err != nil {
-		return nil,err
-	}
+	s.Require().NoError(err)
+
+
+	// We need to read the returned login page to get the correct url with session code, only with this session code
+	// we can log in correctly to keycloak / identity. Additionally, this kind of mimics the user interaction.
+	//
+	// The returned login page (from keycloak) is no valid html code, which means we can't use a HTML parser,
+	// but we can extract the url via a regex
+	//
+	// Example form with corresponding URL we are looking for:
+	//
+	// <form id="kc-form-login" onsubmit="login.disabled = true; return true;"
+	//		action="http://localhost:18080/auth/realms/camunda-platform/login-actions/authenticate?session_code=B0BxW2ST2DH0NYE1J-THQncuCVc2yPck5JFmgEnLWbM&amp;execution=be1c2750-2b28-4044-8cf3-22b1331efeae&amp;client_id=camunda-identity&amp;tab_id=tp2zBJnsh6o"
+	//		method="post">
+	//
+	//
 	defer response.Body.Close()
 	body := response.Body
 	b, err := io.ReadAll(body)
 
-	//  ... get body from /auth/login redirect
-	// <form id="kc-form-login" onsubmit="login.disabled = true; return true;"
-	//		action="http://localhost:18080/auth/realms/camunda-platform/login-actions/authenticate?session_code=B0BxW2ST2DH0NYE1J-THQncuCVc2yPck5JFmgEnLWbM&amp;execution=be1c2750-2b28-4044-8cf3-22b1331efeae&amp;client_id=camunda-identity&amp;tab_id=tp2zBJnsh6o"
-	//		method="post">
-
 	regexCompiled := regexp.MustCompile("(action=\")(.*)(\"[\\s\\w]+=\")")
-
-	submatch := regexCompiled.FindStringSubmatch(string(b))
-
-	//var res map[string]interface{}
-	sessionUrl := string(submatch[2])
+	match := regexCompiled.FindStringSubmatch(string(b))
+	s.Require().GreaterOrEqual(len(match), 3)
+	sessionUrl := match[2]
+	// the url is encoded in the html document, which means we need to replace some characters
 	sessionUrl = strings.Replace(sessionUrl, "&amp;", "&", -1)
+
+	// log in as demo:demo
 	values := url.Values{
 		"username":  {"demo"},
 		"password":  {"demo"},
 		"credentialId": {""},
 	}
+	loginResponse, err := httpClient.PostForm(sessionUrl, values)
+	s.Require().NoError(err)
+	s.Require().Equal(200, loginResponse.StatusCode)
 
-
-	resp, err := httpClient.PostForm(sessionUrl, values)
-	if err != nil {
-		return nil, err
-	}
-
-	b, err = io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	fmt.Println(string(b))
-
+	// the previous log in request caused to store a cookie in our jar
+	// in order to verify whether this is valid and works with identity we have to extract the cookie and set
+	// the cookie value (JWT token) as authentication header
 	jwtToken, err := s.extractJWTTokenFromCookieJar(jar)
 	s.Require().NoError(err)
 
@@ -318,11 +275,11 @@ func (s *integrationTest) loginToIdentity() (*bytes.Buffer, error) {
 	s.Require().NoError(err)
 	getRequest.Header.Set("Authentication", "Bearer " + jwtToken)
 
+	// verify the token with the get request
 	getResponse, err := httpClient.Do(getRequest)
 	s.Require().NoError(err)
 
 	s.Require().Equal(200, getResponse.StatusCode)
-	return nil, nil
 }
 
 func (s *integrationTest) extractJWTTokenFromCookieJar(jar *cookiejar.Jar) (string, error) {
