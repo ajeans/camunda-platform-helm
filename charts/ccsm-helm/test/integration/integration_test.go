@@ -227,7 +227,7 @@ func (s *integrationTest) loginToIdentity() (*bytes.Buffer, error) {
 
 	for _, returnedClient := range otherClients {
 		if (returnedClient != nil) {
-			if (*returnedClient.ClientID == "camunda-identity") {
+			if (*returnedClient.ClientID == "camunda-identity") || strings.Contains(*returnedClient.ClientID, "operate") {
 				id := *returnedClient.ID
 
 				getClient, err := client.GetClient(ctx, token.AccessToken, "camunda-platform", id)
