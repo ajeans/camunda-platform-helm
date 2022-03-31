@@ -215,7 +215,6 @@ func (s *integrationTest) loginToIdentity() {
 	endpoint, closeIdentityPortForward := s.createPortForwardedHttpClientWithPort(identityServiceName, 8080)
 	defer closeIdentityPortForward()
 
-
 	// setup http client with cookie jar - necessary to store tokens
 	jar, err := cookiejar.New(nil)
 	s.Require().NoError(err)
@@ -224,18 +223,46 @@ func (s *integrationTest) loginToIdentity() {
 		Timeout: 30 * time.Second,
 	}
 
-	// request /auth/login - and follow redirect to retrieve login page
-	request, err := http.NewRequest("GET", "http://" + endpoint + "/auth/login", nil)
+	sessionUrl := s.resolveSessionLoginUrl(err, endpoint, httpClient)
+
+	// log in as demo:demo
+	values := url.Values{
+		"username":     {"demo"},
+		"password":     {"demo"},
+	}
+	loginResponse, err := httpClient.PostForm(sessionUrl, values)
+	s.Require().NoError(err)
+	s.Require().Equal(200, loginResponse.StatusCode)
+
+	// The previous log in request caused to store a token in our cookie jar.
+	// In order to verify whether this token is valid and works with identity we have to extract the token and set
+	// the cookie value (JWT token) as authentication header.
+	jwtToken, err := s.extractJWTTokenFromCookieJar(jar)
+	s.Require().NoError(err)
+
+	getRequest, err := http.NewRequest("GET", "http://"+endpoint+"/api/clients", nil)
+	s.Require().NoError(err)
+	getRequest.Header.Set("Authentication", "Bearer "+jwtToken)
+
+	// verify the token with the get request
+	getResponse, err := httpClient.Do(getRequest)
+	s.Require().NoError(err)
+
+	s.Require().Equal(200, getResponse.StatusCode)
+}
+
+func (s *integrationTest) resolveSessionLoginUrl(err error, endpoint string, httpClient http.Client) string {
+	// Send request to /auth/login, and follow redirect to keycloak to retrieve the login page.
+	// We need to read the returned login page to get the correct URL with session code, only with this session code
+	// we are able to log in correctly to keycloak / identity. Additionally, this kind of mimics the user interaction.
+
+	request, err := http.NewRequest("GET", "http://"+endpoint+"/auth/login", nil)
 	s.Require().NoError(err)
 	response, err := httpClient.Do(request)
 	s.Require().NoError(err)
 
-
-	// We need to read the returned login page to get the correct url with session code, only with this session code
-	// we can log in correctly to keycloak / identity. Additionally, this kind of mimics the user interaction.
-	//
-	// The returned login page (from keycloak) is no valid html code, which means we can't use a HTML parser,
-	// but we can extract the url via a regex
+	// The returned login page (from keycloak) is no valid html code, which means we can't use an HTML parser,
+	// but we can extract the url via regex.
 	//
 	// Example form with corresponding URL we are looking for:
 	//
@@ -252,34 +279,9 @@ func (s *integrationTest) loginToIdentity() {
 	match := regexCompiled.FindStringSubmatch(string(b))
 	s.Require().GreaterOrEqual(len(match), 3)
 	sessionUrl := match[2]
+
 	// the url is encoded in the html document, which means we need to replace some characters
-	sessionUrl = strings.Replace(sessionUrl, "&amp;", "&", -1)
-
-	// log in as demo:demo
-	values := url.Values{
-		"username":  {"demo"},
-		"password":  {"demo"},
-		"credentialId": {""},
-	}
-	loginResponse, err := httpClient.PostForm(sessionUrl, values)
-	s.Require().NoError(err)
-	s.Require().Equal(200, loginResponse.StatusCode)
-
-	// the previous log in request caused to store a cookie in our jar
-	// in order to verify whether this is valid and works with identity we have to extract the cookie and set
-	// the cookie value (JWT token) as authentication header
-	jwtToken, err := s.extractJWTTokenFromCookieJar(jar)
-	s.Require().NoError(err)
-
-	getRequest, err := http.NewRequest("GET", "http://" + endpoint + "/api/clients", nil)
-	s.Require().NoError(err)
-	getRequest.Header.Set("Authentication", "Bearer " + jwtToken)
-
-	// verify the token with the get request
-	getResponse, err := httpClient.Do(getRequest)
-	s.Require().NoError(err)
-
-	s.Require().Equal(200, getResponse.StatusCode)
+	return strings.Replace(sessionUrl, "&amp;", "&", -1)
 }
 
 func (s *integrationTest) extractJWTTokenFromCookieJar(jar *cookiejar.Jar) (string, error) {
