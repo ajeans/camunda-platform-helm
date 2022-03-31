@@ -209,6 +209,10 @@ func (s *integrationTest) loginToIdentity() (*bytes.Buffer, error) {
 	secret := k8s.GetSecret(s.T(), s.kubeOptions, "ccsm-helm-test-keycloak")
 	password := secret.Data["admin-password"]
 
+	keycloakServiceName := fmt.Sprintf("%s-keycl", s.release)
+	_, closePortForward := s.createPortForwardedHttpClientWithPort(keycloakServiceName, 18080)
+	defer closePortForward()
+
 	client := gocloak.NewClient("http://localhost:18080")
 	restyClient := client.RestyClient()
 	restyClient.SetDebug(true)
@@ -251,7 +255,7 @@ func (s *integrationTest) loginToIdentity() (*bytes.Buffer, error) {
 	}
 
 	identityServiceName := fmt.Sprintf("%s-identity", s.release)
-	endpoint, closeFn := s.createPortForwardedHttpClient(identityServiceName)
+	endpoint, closeFn := s.createPortForwardedHttpClientWithPort(identityServiceName, 8080)
 	defer closeFn()
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -292,6 +296,7 @@ func (s *integrationTest) loginToIdentity() (*bytes.Buffer, error) {
 		"password":  {"demo"},
 		"credentialId": {""},
 	}
+
 
 	resp, err := httpClient.PostForm(sessionUrl, values)
 	if err != nil {
@@ -339,7 +344,7 @@ func (s *integrationTest) queryProcessDefinitionsFromOperate() (*bytes.Buffer, e
 		return nil, err
 	}
 
-http://localhost:8081/api/clients
+//http://localhost:8081/api/clients
 
 	// curl -i -H "Content-Type: application/json" -XPOST "http://localhost:8080/v1/process-definitions/list" --cookie "ope-session" -d "{}"
 	return s.queryApi(httpClient, "http://"+endpoint+"/v1/process-definitions/list", bytes.NewBufferString("{}"))
@@ -436,6 +441,22 @@ func (s *integrationTest) createPortForwardedClient(serviceName string) (zbc.Cli
 	}
 
 	return client, func() { client.Close(); tunnel.Close() }, nil
+}
+
+func (s *integrationTest) createPortForwardedHttpClientWithPort(serviceName string, port int) (string, func()) {
+	// NOTE: this only waits until the service is created, not until the underlying pods are ready to receive traffic
+	k8s.WaitUntilServiceAvailable(s.T(), s.kubeOptions, serviceName, 90, 1*time.Second)
+
+	// remote port needs to be container port - not service port!
+	tunnel := k8s.NewTunnel(s.kubeOptions, k8s.ResourceTypeService, serviceName, port, 8080)
+
+	// the gateway is not ready/receiving traffic until at least one leader is present
+	s.waitUntilPortForwarded(tunnel, 30, 2*time.Second)
+
+	endpoint := fmt.Sprintf("localhost:%d", port)
+	return endpoint, func() {
+		tunnel.Close()
+	}
 }
 
 func (s *integrationTest) createPortForwardedHttpClient(serviceName string) (string, func()) {
