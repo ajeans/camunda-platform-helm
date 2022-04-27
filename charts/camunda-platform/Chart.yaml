@@ -32,6 +32,9 @@ dependencies:
   repository: "https://helm.elastic.co"
   version: 7.17.1
   condition: "elasticsearch.enabled"
+- name: common
+  repository: https://charts.bitnami.com/bitnami
+  version: 1.x.x
 maintainers:
   - name: Zelldon
     email: christopher.zell@camunda.com
